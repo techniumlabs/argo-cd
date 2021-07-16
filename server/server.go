@@ -186,7 +186,7 @@ type ArgoCDServerOpts struct {
 // initializeDefaultProject creates the default project if it does not already exist
 func initializeDefaultProject(opts ArgoCDServerOpts) error {
 	defaultProj := &v1alpha1.AppProject{
-		ObjectMeta: metav1.ObjectMeta{Name: common.DefaultAppProjectName, Namespace: opts.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.DefaultAppProjectName, Namespace: opts.Namespace},
 		Spec: v1alpha1.AppProjectSpec{
 			SourceRepos:              []string{"*"},
 			Destinations:             []v1alpha1.ApplicationDestination{{Server: "*", Namespace: "*"}},
@@ -308,7 +308,7 @@ func (a *ArgoCDServer) Run(ctx context.Context, port int, metricsPort int) {
 	})
 	errors.CheckError(realErr)
 
-	// Cmux is used to support servicing gRPC and HTTP1.1+JSON on the same port
+	// CMux is used to support servicing gRPC and HTTP1.1+JSON on the same port
 	tcpm := cmux.New(conn)
 	var tlsm cmux.CMux
 	var grpcL net.Listener
@@ -316,7 +316,7 @@ func (a *ArgoCDServer) Run(ctx context.Context, port int, metricsPort int) {
 	var httpsL net.Listener
 	if !a.useTLS() {
 		httpL = tcpm.Match(cmux.HTTP1Fast())
-		grpcL = tcpm.Match(cmux.HTTP2HeaderField("content-type", "application/grpc"))
+		grpcL = tcpm.MatchWithWriters(cmux.HTTP2MatchHeaderFieldSendSettings("content-type", "application/grpc"))
 	} else {
 		// We first match on HTTP 1.1 methods.
 		httpL = tcpm.Match(cmux.HTTP1Fast())
@@ -334,7 +334,7 @@ func (a *ArgoCDServer) Run(ctx context.Context, port int, metricsPort int) {
 		// Now, we build another mux recursively to match HTTPS and gRPC.
 		tlsm = cmux.New(tlsl)
 		httpsL = tlsm.Match(cmux.HTTP1Fast())
-		grpcL = tlsm.Match(cmux.Any())
+		grpcL = tlsm.MatchWithWriters(cmux.HTTP2MatchHeaderFieldSendSettings("content-type", "application/grpc"))
 	}
 
 	// Start the muxed listeners for our servers
@@ -417,7 +417,7 @@ func (a *ArgoCDServer) watchSettings() {
 			break
 		}
 		if prevOIDCConfig != a.settings.OIDCConfigRAW {
-			log.Infof("odic config modified. restarting")
+			log.Infof("oidc config modified. restarting")
 			break
 		}
 		if prevURL != a.settings.URL {
@@ -725,8 +725,9 @@ func (a *ArgoCDServer) newHTTPServer(ctx context.Context, port int, grpcWebHandl
 	// Dex reverse proxy and client app and OAuth2 login/callback
 	a.registerDexHandlers(mux)
 
-	// Webhook handler for git events
-	acdWebhookHandler := webhook.NewHandler(a.Namespace, a.AppClientset, a.settings, a.settingsMgr, repocache.NewCache(a.Cache.GetCache(), 24*time.Hour))
+	// Webhook handler for git events (Note: cache timeouts are hardcoded because API server does not write to cache and not really using them)
+	argoDB := db.NewDB(a.Namespace, a.settingsMgr, a.KubeClientset)
+	acdWebhookHandler := webhook.NewHandler(a.Namespace, a.AppClientset, a.settings, a.settingsMgr, repocache.NewCache(a.Cache.GetCache(), 24*time.Hour, 3*time.Minute), a.Cache, argoDB)
 	mux.HandleFunc("/api/webhook", acdWebhookHandler.Handler)
 
 	// Serve cli binaries directly from API server
@@ -734,7 +735,11 @@ func (a *ArgoCDServer) newHTTPServer(ctx context.Context, port int, grpcWebHandl
 
 	// Serve UI static assets
 	if a.StaticAssetsDir != "" {
-		mux.HandleFunc("/", a.newStaticAssetsHandler(a.StaticAssetsDir, a.BaseHRef))
+		var assetsHandler http.Handler = http.HandlerFunc(a.newStaticAssetsHandler(a.StaticAssetsDir, a.BaseHRef))
+		if a.ArgoCDServerOpts.EnableGZip {
+			assetsHandler = compressHandler(assetsHandler)
+		}
+		mux.Handle("/", assetsHandler)
 	}
 	return &httpS
 }
@@ -916,6 +921,10 @@ func (a *ArgoCDServer) Authenticate(ctx context.Context) (context.Context, error
 				log.Warnf("Failed to set %s header", renewTokenKey)
 			}
 		}
+	}
+	if claimsErr != nil {
+		// nolint:staticcheck
+		ctx = context.WithValue(ctx, util_session.AuthErrorCtxKey, claimsErr)
 	}
 
 	if claimsErr != nil {

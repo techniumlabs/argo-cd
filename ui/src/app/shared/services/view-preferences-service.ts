@@ -17,6 +17,7 @@ export interface AppDetailsPreferences {
 
 export interface PodViewPreferences {
     sortMode: PodGroupType;
+    hideUnschedulable: boolean;
 }
 
 export type AppsListViewType = 'tiles' | 'list' | 'summary';
@@ -70,13 +71,14 @@ const DEFAULT_PREFERENCES: ViewPreferences = {
     version: 1,
     appDetails: {
         view: 'tree',
-        resourceFilter: ['kind:Deployment', 'kind:Service', 'kind:Pod', 'kind:StatefulSet', 'kind:Ingress', 'kind:ConfigMap', 'kind:Job', 'kind:DaemonSet', 'kind:Workflow'],
+        resourceFilter: [],
         inlineDiff: false,
         compactDiff: false,
         resourceView: 'manifest',
         orphanedResources: false,
         podView: {
-            sortMode: 'node'
+            sortMode: 'node',
+            hideUnschedulable: true
         },
         darkMode: false,
         followLogs: false
